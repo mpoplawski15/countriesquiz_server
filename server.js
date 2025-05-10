@@ -1,11 +1,16 @@
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
 require('dotenv').config();
 
 const app = express();
 
-// Configure CORS to allow requests from your Cordova app
+const JWT_SECRET = process.env.JWT_SECRET || '2fbcefab3a25e6c28651e96b681a35afdc14247940f7b9d3d4dfe820d63e091d'; // Use environment variable in production!
+
+// Configure CORS to allow requests from Cordova app
 app.use(cors({
   origin: '*', // In production, you might want to restrict this to your app's domain
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -126,6 +131,136 @@ app.post('/api/scores', async (req, res) => {
   }
 });
 
+// Register endpoint
+app.post('/api/auth/register', async (req, res) => {
+    try {
+      const { username, email, password } = req.body;
+      
+      // Validate input
+      if (!username || !email || !password) {
+        return res.status(400).json({ error: 'All fields are required' });
+      }
+      
+      // Check if user already exists
+      const [existingUsers] = await pool.query(
+        'SELECT * FROM users WHERE email = ? OR username = ?', 
+        [email, username]
+      );
+      
+      if (existingUsers.length > 0) {
+        return res.status(409).json({ error: 'User already exists' });
+      }
+      
+      // Hash password
+      const saltRounds = 10;
+      const passwordHash = await bcrypt.hash(password, saltRounds);
+      
+      // Store user in database
+      const [result] = await pool.query(
+        'INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)',
+        [username, email, passwordHash]
+      );
+      
+      res.status(201).json({ 
+        success: true, 
+        message: 'User registered successfully',
+        userId: result.insertId
+      });
+      
+    } catch (error) {
+      console.error('Registration error:', error);
+      res.status(500).json({ error: 'Server error during registration' });
+    }
+  });
+  
+  // Login endpoint
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      
+      // Find user
+      const [users] = await pool.query(
+        'SELECT * FROM users WHERE username = ? OR email = ?', 
+        [username, username]
+      );
+      
+      if (users.length === 0) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      
+      const user = users[0];
+      
+      // Compare password
+      const passwordMatch = await bcrypt.compare(password, user.password_hash);
+      
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      
+      // Update last login
+      await pool.query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+      
+      // Generate JWT token
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          username: user.username 
+        }, 
+        JWT_SECRET, 
+        { expiresIn: '7d' }
+      );
+      
+      res.json({
+        success: true,
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email
+        }
+      });
+      
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json({ error: 'Server error during login' });
+    }
+  });
+  
+  // Middleware to verify token
+  const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (err) {
+        return res.status(403).json({ error: 'Invalid or expired token' });
+      }
+      
+      req.user = user;
+      next();
+    });
+  };
+  
+  // Protected endpoint example
+  app.get('/api/user/profile', authenticateToken, async (req, res) => {
+    try {
+      const [users] = await pool.query('SELECT id, username, email, created_at FROM users WHERE id = ?', [req.user.userId]);
+      
+      if (users.length === 0) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      
+      res.json(users[0]);
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
 // API health check endpoint
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'OK', message: 'API is running' });
@@ -134,7 +269,7 @@ app.get('/api/health', (req, res) => {
 // Root route that provides API info
 app.get('/', (req, res) => {
   res.status(200).json({
-    name: 'UI5 Game Score API',
+    name: 'CountriesQuiz API info',
     version: '1.0.0',
     endpoints: [
       { method: 'GET', path: '/api/scores', description: 'Get all scores' },
