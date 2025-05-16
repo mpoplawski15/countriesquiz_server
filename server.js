@@ -233,7 +233,11 @@ app.get('/api/auth/verify-email', async (req, res) => {
         const { token } = req.query;
 
         if (!token) {
-            return res.status(400).json({ error: 'Verification token is required' });
+            return res.status(400).send(createHtmlResponse(
+                'Verification Failed',
+                'Verification token is missing',
+                'error'
+            ));
         }
 
         // Find user with this token
@@ -243,7 +247,11 @@ app.get('/api/auth/verify-email', async (req, res) => {
         );
 
         if (users.length === 0) {
-            return res.status(404).json({ error: 'Invalid verification token' });
+            return res.status(404).send(createHtmlResponse(
+                'Verification Failed',
+                'Invalid verification token. Please check your email and try again.',
+                'error'
+            ));
         }
 
         const user = users[0];
@@ -251,7 +259,11 @@ app.get('/api/auth/verify-email', async (req, res) => {
         // Check if token has expired
         const tokenExpiry = new Date(user.token_expiry);
         if (tokenExpiry < new Date()) {
-            return res.status(400).json({ error: 'Verification token has expired. Please request a new one.' });
+            return res.status(400).send(createHtmlResponse(
+                'Verification Failed',
+                'Verification token has expired. Please request a new one.',
+                'error'
+            ));
         }
 
         // Mark user as verified
@@ -260,15 +272,24 @@ app.get('/api/auth/verify-email', async (req, res) => {
             [user.id]
         );
 
-        res.json({ success: true, message: 'Email verified successfully' });
+        // Return HTML response instead of JSON
+        return res.send(createHtmlResponse(
+            'Email Verified Successfully',
+            `Thank you ${user.username}! Your email has been verified successfully. You can now log in to your CountriesQuiz account.`,
+            'success'
+        ));
 
     } catch (error) {
         console.error('Email verification error:', error);
-        res.status(500).json({ error: 'Server error during email verification' });
+        return res.status(500).send(createHtmlResponse(
+            'Verification Error',
+            'An error occurred during verification. Please try again later.',
+            'error'
+        ));
     }
 });
 
-// Resend verification email endpoint
+// Resend verification email endpoint with rate limiting
 app.post('/api/auth/resend-verification', async (req, res) => {
     try {
         const { email } = req.body;
@@ -294,14 +315,36 @@ app.post('/api/auth/resend-verification', async (req, res) => {
             return res.status(400).json({ error: 'Email is already verified' });
         }
 
+        // Check for cooldown period (e.g., 5 minutes between resend attempts)
+        const cooldownMinutes = 10; // Adjust this value as needed
+        
+        // Add a last_email_sent field to your users table if it doesn't exist
+        // ALTER TABLE users ADD COLUMN last_email_sent DATETIME NULL;
+        
+        if (user.last_email_sent) {
+            const lastSent = new Date(user.last_email_sent);
+            const cooldownExpiry = new Date(lastSent.getTime() + (cooldownMinutes * 60000));
+            const now = new Date();
+            
+            if (now < cooldownExpiry) {
+                const remainingSeconds = Math.ceil((cooldownExpiry - now) / 1000);
+                const remainingMinutes = Math.ceil(remainingSeconds / 60);
+                
+                return res.status(429).json({ 
+                    status: 429,
+                    retryAfter: remainingSeconds
+                });
+            }
+        }
+
         // Generate new verification token
         const verificationToken = generateVerificationToken();
         const tokenExpiry = new Date();
         tokenExpiry.setHours(tokenExpiry.getHours() + 24); // Token expires in 24 hours
 
-        // Update user with new token
+        // Update user with new token and record when email was sent
         await pool.query(
-            'UPDATE users SET verification_token = ?, token_expiry = ? WHERE id = ?',
+            'UPDATE users SET verification_token = ?, token_expiry = ?, last_email_sent = NOW() WHERE id = ?',
             [verificationToken, tokenExpiry, user.id]
         );
 
@@ -309,7 +352,11 @@ app.post('/api/auth/resend-verification', async (req, res) => {
         const emailSent = await sendVerificationEmail(email, verificationToken, user.username);
 
         if (emailSent) {
-            res.json({ success: true, message: 'Verification email sent successfully' });
+            res.json({ 
+                success: true, 
+                message: 'Verification email sent successfully',
+                cooldownMinutes: cooldownMinutes // Inform frontend of the cooldown period
+            });
         } else {
             res.status(500).json({ error: 'Failed to send verification email' });
         }
@@ -440,3 +487,77 @@ const PORT = process.env.PORT || 3300;
 app.listen(PORT, () => {
     console.log('Score API server running on port ' + PORT);
 });
+
+// Helper function to create HTML response
+function createHtmlResponse(title, message, status) {
+    const baseUrl = process.env.APP_URL || 'http://localhost:8080/index.html';
+    const color = status === 'success' ? '#4CAF50' : '#f44336';
+    const icon = status === 'success' ? '✓' : '✗';
+    
+    return `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>CountriesQuiz - ${title}</title>
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background-color: #f5f5f5;
+                margin: 0;
+                padding: 0;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+            }
+            .container {
+                background-color: white;
+                border-radius: 8px;
+                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+                padding: 40px;
+                max-width: 500px;
+                text-align: center;
+            }
+            .icon {
+                font-size: 64px;
+                color: ${color};
+                margin-bottom: 20px;
+            }
+            h1 {
+                color: #333;
+                margin-bottom: 20px;
+            }
+            p {
+                color: #666;
+                line-height: 1.6;
+                margin-bottom: 30px;
+            }
+            .button {
+                background-color: #007BFF;
+                color: white;
+                padding: 12px 24px;
+                border: none;
+                border-radius: 4px;
+                text-decoration: none;
+                font-size: 16px;
+                transition: background-color 0.3s;
+                cursor: pointer;
+            }
+            .button:hover {
+                background-color: #0069d9;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="icon">${icon}</div>
+            <h1>${title}</h1>
+            <p>${message}</p>
+            <a href="${baseUrl}" class="button">Go to CountriesQuiz</a>
+        </div>
+    </body>
+    </html>
+    `;
+}
